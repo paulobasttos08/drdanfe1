@@ -2913,17 +2913,63 @@ ${pagRows?`<div style="margin-top:2mm;border-top:1px dashed #000;padding-top:1.5
     if (e.key === 'Enter' && !consultBtn.disabled) consultBtn.click();
   });
 
+  /* ── API 1: BrasilAPI ── */
   async function consultarBrasilApi(chave) {
     const r = await fetch(`https://brasilapi.com.br/api/nfe/v1/${chave}`);
-    if (r.status === 404 || r.status === 422) return null;
+    if (r.status === 404 || r.status === 422 || r.status === 400) return null;
     if (!r.ok) throw new Error('BrasilAPI: ' + r.status);
-    return r.json();
+    const d = await r.json(); return d;
   }
+
+  /* ── API 2: NFe.io ── */
   async function consultarNFeIO(chave) {
     const r = await fetch(`https://api.nfe.io/v1/taxnumber/${chave}/nfe`, {headers:{Accept:'application/json'}});
-    if (r.status === 404) return null;
+    if (r.status === 404 || r.status === 400) return null;
     if (!r.ok) throw new Error('NFe.io: ' + r.status);
     return r.json();
+  }
+
+  /* ── API 3: NFe.codes (SEFAZ direto) ── */
+  async function consultarNFeCodes(chave) {
+    const r = await fetch(`https://api.nfe.codes/nfe/v1/${chave}`, {
+      headers: { 'Accept': 'application/json' }
+    });
+    if (r.status === 404 || r.status === 400 || r.status === 401) return null;
+    if (!r.ok) throw new Error('nfe.codes: ' + r.status);
+    return r.json();
+  }
+
+  /* ── API 4: Nota Fiscal API (público) ── */
+  async function consultarNotaFiscalApi(chave) {
+    const r = await fetch(`https://api.notafiscal.net/nfe/${chave}`, {
+      headers: { 'Accept': 'application/json' }
+    });
+    if (r.status === 404 || r.status === 400 || r.status === 401) return null;
+    if (!r.ok) throw new Error('notafiscal.net: ' + r.status);
+    return r.json();
+  }
+
+  /* ── Consulta encadeada: tenta todas as fontes ── */
+  async function consultarTodasAPIs(chave, onProgress) {
+    const fontes = [
+      { nome: 'BrasilAPI', fn: () => consultarBrasilApi(chave) },
+      { nome: 'NFe.io', fn: () => consultarNFeIO(chave) },
+      { nome: 'NFe.codes', fn: () => consultarNFeCodes(chave) },
+      { nome: 'NotaFiscal API', fn: () => consultarNotaFiscalApi(chave) },
+    ];
+    for (const fonte of fontes) {
+      try {
+        onProgress && onProgress(`Consultando ${fonte.nome}…`);
+        const d = await fonte.fn();
+        if (d && !d._err) {
+          console.info('✓ Dados retornados por:', fonte.nome);
+          return d;
+        }
+      } catch(e) {
+        console.warn(`✗ ${fonte.nome}:`, e.message);
+      }
+    }
+    return null;
   }
 
   function statusPill(sit) {
@@ -3036,8 +3082,15 @@ ${pagRows?`<div style="margin-top:2mm;border-top:1px dashed #000;padding-top:1.5
       dig(chave).match(/.{1,4}/g).map(c=>`<span>${c}</span>`).join(' ');
     document.getElementById('nfe-status-pill').innerHTML = statusPill('Desconhecida');
     document.getElementById('nfe-summary').innerHTML =
-      `<div class="nfe-summary-item"><div class="nfe-summary-num" style="font-size:.9rem;color:var(--text-soft)">Não localizada via API</div>
-       <div class="nfe-summary-label">CNPJ emitente: ${fmtCnpj(meta.cnpjEmit)}</div></div>`;
+      `<div class="nfe-summary-item" style="flex:1">
+         <div class="nfe-summary-num" style="font-size:.85rem;color:var(--text-soft);line-height:1.4">
+           Nota não encontrada nas APIs públicas.<br>
+           <span style="font-size:.78rem;color:var(--text-faint)">
+             Faça upload do XML para gerar o DANFE completo.
+           </span>
+         </div>
+         <div class="nfe-summary-label" style="margin-top:6px">CNPJ emitente: ${fmtCnpj(meta.cnpjEmit)} &nbsp;·&nbsp; UF: ${meta.uf} &nbsp;·&nbsp; ${meta.mes}/${meta.ano}</div>
+       </div>`;
     document.getElementById('nfe-parts').innerHTML =
       `<div class="nfe-part"><div class="nfe-part-label">Emitente (da chave)</div>
         <div class="nfe-part-cnpj">${fmtCnpj(meta.cnpjEmit)}</div></div>
@@ -3126,25 +3179,40 @@ ${pagRows?`<div style="margin-top:2mm;border-top:1px dashed #000;padding-top:1.5
   consultBtn.addEventListener('click', async () => {
     const chave = dig(chaveInput.value);
     if (chave.length !== 44) return;
-    showMsg(loadingMsg, 'Consultando SEFAZ…', 'msg-loading');
+
+    showMsg(loadingMsg, 'Consultando SEFAZ… (tentando múltiplas fontes)', 'msg-loading');
     resultDiv.style.display = 'none';
     fallbackDiv.style.display = 'none';
     resultDiv.className = 'panel result-card';
     consultBtn.disabled = true;
     const meta = parseChaveMeta(chave);
+
     try {
-      let data = null;
-      try { data = await consultarBrasilApi(chave); } catch(e) { console.warn(e); }
-      if (!data) { try { data = await consultarNFeIO(chave); } catch(e) { console.warn(e); } }
-      if (data) { showMsg(null, ''); renderNFeResult(data, chave); }
-      else {
+      const data = await consultarTodasAPIs(chave, (msg) => {
+        showMsg(loadingMsg, msg, 'msg-loading');
+      });
+
+      if (data) {
+        showMsg(null, '');
+        renderNFeResult(data, chave);
+      } else {
+        /* Nenhuma API retornou — mostra dados da chave + orientação clara */
         renderFromMeta(meta, chave);
-        showMsg(errorMsg, 'API pública não retornou dados. Exibindo dados da chave + link SEFAZ. Dica: faça upload do XML para gerar o DANFE completo.', 'msg-warn');
+        showMsg(errorMsg,
+          '⚠️ Esta nota não está disponível nas bases públicas consultadas. ' +
+          'Isso é comum para notas da Bahia, Maranhão, Piauí e outros estados com integração limitada. ' +
+          'Faça o upload do XML da nota para gerar o DANFE completo — ou consulte diretamente na SEFAZ pelo link abaixo.',
+          'msg-warn'
+        );
       }
     } catch(e) {
       console.error(e);
       renderFromMeta(meta, chave);
-      showMsg(errorMsg, 'Erro: ' + (e.message||e) + '. Exibindo dados da chave.', 'msg-warn');
+      showMsg(errorMsg,
+        '⚠️ Não foi possível consultar esta nota. ' +
+        'Faça o upload do XML para gerar o DANFE, ou use o link da SEFAZ abaixo.',
+        'msg-warn'
+      );
     } finally {
       loadingMsg.className = 'msg msg-loading';
       consultBtn.disabled = false;
